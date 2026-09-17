@@ -6,9 +6,11 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(title="Edge AI Multi-Step Forecaster")
 
-# Load models and preprocessing pipelines globally into memory
-scaler = joblib.load("models/scaler.pkl")
+# 1. Load scalers into memory using your actual filenames
+scaler_lgb = joblib.load("models/scaler_lgb.pkl")
+scaler_xgb = joblib.load("models/scaler_xgboost.pkl")
 
+# 2. Load models into memory
 xgb_soil = xgb.XGBRegressor()
 xgb_soil.load_model("models/xgb_soil.json")
 
@@ -27,41 +29,42 @@ class TelemetryPayload(BaseModel):
 
 @app.get("/")
 def home():
-    return {"status": "Model service running on Hugging Face Spaces"}
+    return {"status": "Model service running"}
 
 
 @app.post("/predict")
 def predict_horizon(payload: TelemetryPayload):
-    # Convert input payload to a 2D NumPy array
+    # Convert input payload to 2D NumPy array
     raw_data = np.array(payload.sequence, dtype=np.float32).reshape(1, -1)
 
-    # Scale telemetry features before passing to models
     try:
-        scaled_data = scaler.transform(raw_data)
+        # Scale input telemetry features separately using model-specific scalers
+        scaled_data_xgb = scaler_xgb.transform(raw_data)
+        scaled_data_lgb = scaler_lgb.transform(raw_data)
     except Exception as err:
         raise HTTPException(
             status_code=400,
-            detail=f"Preprocessing error: Verify that sequence length matches expected feature count. Details: {str(err)}",
+            detail=f"Preprocessing error: Verify sequence length matches expected features. Details: {str(err)}",
         )
 
-    # Run core baseline forecasting models
-    soil_pred = xgb_soil.predict(scaled_data)
-    flow_pred = lgb_flow.predict(scaled_data)
+    # Always-active baseline predictions (using their respective scaled inputs)
+    soil_pred = xgb_soil.predict(scaled_data_xgb)
+    flow_pred = lgb_flow.predict(scaled_data_lgb)
 
-    # Dynamic fallback route for distance forecaster during elevated risk states
+    # Dynamic fallback based on Layer 2 Risk state
     if payload.layer2_risk in (1, 2):
-        dist_pred = lgb_dist.predict(scaled_data)
+        dist_pred = lgb_dist.predict(scaled_data_lgb)
         active_model = "LightGBM"
     else:
-        dist_pred = xgb_dist.predict(scaled_data)
+        dist_pred = xgb_dist.predict(scaled_data_xgb)
         active_model = "XGBoost"
 
-    # Flatten predictions safely regardless of 1D or 2D output shape
+    # Flatten prediction arrays safely (handles both 1D and 2D model outputs)
     dist_flat = np.asarray(dist_pred).ravel()
     flow_flat = np.asarray(flow_pred).ravel()
     soil_flat = np.asarray(soil_pred).ravel()
 
-    # Truncate multi-step forecasts to the top 6 horizon steps (t+1 to t+6)
+    # Truncate multi-step forecasts to top 6 horizon steps (t+1 to t+6)
     return {
         "distance_cm": dist_flat[:6].tolist(),
         "flow_rate": flow_flat[:6].tolist(),
