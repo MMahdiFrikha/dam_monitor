@@ -12,14 +12,14 @@ scaler_xgb = joblib.load("models/scaler_xgboost.pkl")
 
 # 2. Load models into memory
 xgb_soil = xgb.XGBRegressor()
-xgb_soil.load_model("models/xgb_soil.json")
+xgb_soil.load_model("models/xgb_model_soil_raw.json")
 
-lgb_flow = joblib.load("models/lgb_flow.pkl")
+lgb_flow = joblib.load("models/lgbm_model_flow_rate_l_min.pkl")
 
 xgb_dist = xgb.XGBRegressor()
-xgb_dist.load_model("models/xgb_distance.json")
+xgb_dist.load_model("models/xgb_model_distance_cm.json")
 
-lgb_dist = joblib.load("models/lgb_distance.pkl")
+lgb_dist = joblib.load("models/lgbm_model_distance_cm.pkl")
 
 
 class TelemetryPayload(BaseModel):
