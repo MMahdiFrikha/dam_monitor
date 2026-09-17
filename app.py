@@ -1,12 +1,12 @@
 import joblib
 import numpy as np
 import xgboost as xgb
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 
 app = FastAPI(title="Edge AI Multi-Step Forecaster")
 
-# 1. Load models into memory when Space starts
+# Load models and preprocessing pipelines globally into memory
 scaler = joblib.load("models/scaler.pkl")
 
 xgb_soil = xgb.XGBRegressor()
@@ -21,8 +21,8 @@ lgb_dist = joblib.load("models/lgb_distance.pkl")
 
 
 class TelemetryPayload(BaseModel):
-    sequence: list  # Flat array of 36 timesteps x features
-    layer2_risk: int  # 0: Normal, 1: Warning, 2: Critical
+    sequence: list[float] = Field(..., description="Flat telemetry feature array")
+    layer2_risk: int = Field(..., ge=0, le=2, description="Risk level: 0=Normal, 1=Warning, 2=Critical")
 
 
 @app.get("/")
@@ -32,25 +32,39 @@ def home():
 
 @app.post("/predict")
 def predict_horizon(payload: TelemetryPayload):
-    # Convert input array to 2D numpy array
-    data = np.array(payload.sequence).reshape(1, -1)
+    # Convert input payload to a 2D NumPy array
+    raw_data = np.array(payload.sequence, dtype=np.float32).reshape(1, -1)
 
-    # Always-active models
-    soil_pred = xgb_soil.predict(data)
-    flow_pred = lgb_flow.predict(data)
+    # Scale telemetry features before passing to models
+    try:
+        scaled_data = scaler.transform(raw_data)
+    except Exception as err:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Preprocessing error: Verify that sequence length matches expected feature count. Details: {str(err)}",
+        )
 
-    # Dynamic Switch based on Layer 2 Risk state (Switch to LightGBM on Risk 1 or 2)
-    if payload.layer2_risk in [1, 2]:
-        dist_pred = lgb_dist.predict(data)
+    # Run core baseline forecasting models
+    soil_pred = xgb_soil.predict(scaled_data)
+    flow_pred = lgb_flow.predict(scaled_data)
+
+    # Dynamic fallback route for distance forecaster during elevated risk states
+    if payload.layer2_risk in (1, 2):
+        dist_pred = lgb_dist.predict(scaled_data)
         active_model = "LightGBM"
     else:
-        dist_pred = xgb_dist.predict(data)
+        dist_pred = xgb_dist.predict(scaled_data)
         active_model = "XGBoost"
 
-    # Truncate horizon to top 6 steps (t+1 to t+6)
+    # Flatten predictions safely regardless of 1D or 2D output shape
+    dist_flat = np.asarray(dist_pred).ravel()
+    flow_flat = np.asarray(flow_pred).ravel()
+    soil_flat = np.asarray(soil_pred).ravel()
+
+    # Truncate multi-step forecasts to the top 6 horizon steps (t+1 to t+6)
     return {
-        "distance_cm": dist_pred[0, :6].tolist(),
-        "flow_rate": flow_pred[0, :6].tolist(),
-        "soil_raw": soil_pred[0, :6].tolist(),
+        "distance_cm": dist_flat[:6].tolist(),
+        "flow_rate": flow_flat[:6].tolist(),
+        "soil_raw": soil_flat[:6].tolist(),
         "distance_model_used": active_model,
     }
