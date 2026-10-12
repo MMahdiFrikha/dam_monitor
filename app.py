@@ -54,7 +54,9 @@ lgb_dist = joblib.load(resolve_model_path("lgbm_model_distance_cm.pkl"))
 class TelemetryPayload(BaseModel):
     sequence: list[float] = Field(..., description="Flat array of 36 timesteps x 7 features (252 total floats)")
     layer2_risk: int = Field(..., ge=0, le=2, description="Risk level: 0=Normal, 1=Warning, 2=Critical")
-    station_id: str | None = Field(default=None, description="Optional station identifier")
+    station_id: str | None = Field(default="0", description="Station identifier")
+    overflow_alert: bool | None = Field(default=False)
+    ai_anomaly_alert: bool | None = Field(default=False)
 
 
 @app.get("/")
@@ -73,14 +75,14 @@ def predict_horizon(payload: TelemetryPayload):
         )
 
     try:
-        # Reshape 252 flat values to (36 timesteps, 7 features) for scaling
+        # Reshape 252 flat values to (36 timesteps, 7 features)
         timesteps_2d = raw_array.reshape(36, 7)
 
-        # Apply scalers trained on 7 features across all 36 timesteps
+        # Apply scalers
         scaled_timesteps_xgb = scaler_xgb.transform(timesteps_2d)
         scaled_timesteps_lgb = scaler_lgb.transform(timesteps_2d)
 
-        # Flatten back into (1, 252) matrix expected by models
+        # Flatten into (1, 252) expected by the models
         scaled_data_xgb = scaled_timesteps_xgb.reshape(1, -1)
         scaled_data_lgb = scaled_timesteps_lgb.reshape(1, -1)
     except Exception as err:
@@ -98,10 +100,20 @@ def predict_horizon(payload: TelemetryPayload):
         dist_pred = xgb_dist.predict(scaled_data_xgb)
         active_model = "XGBoost"
 
-    # Extract first 6 steps of the prediction horizon
+    # Extract first 6 steps of the forecast horizon
     dist_horizon = np.asarray(dist_pred).ravel()[:6].tolist()
     flow_horizon = np.asarray(flow_pred).ravel()[:6].tolist()
     soil_horizon = np.asarray(soil_pred).ravel()[:6].tolist()
+
+    # Extract the current/latest sensor readings from the last timestep (t=36)
+    latest_step = timesteps_2d[-1]
+    curr_distance = float(latest_step[0])
+    curr_rain_raw = int(latest_step[1])
+    curr_flow_rate = float(latest_step[2])
+    curr_soil_raw = int(latest_step[3])
+    curr_tds_voltage = float(latest_step[4])
+    curr_edge_ai_score = float(latest_step[5])
+    curr_fog_class = str(int(latest_step[6]))
 
     # --- Persist to Supabase ---
     conn = get_db_connection()
@@ -112,14 +124,34 @@ def predict_horizon(payload: TelemetryPayload):
                     """
                     INSERT INTO forecasts (
                         station_id,
+                        distance,
+                        rain_raw,
+                        flow_rate,
+                        soil_raw,
+                        tds_voltage,
+                        edge_ai_score,
+                        fog_class,
+                        overflow_alert,
+                        ai_anomaly_alert,
+                        synced_to_cloud,
                         prediction_distance,
                         prediction_flow_rate,
                         prediction_soil_raw,
                         distance_model_used
-                    ) VALUES (%s, %s, %s, %s, %s);
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
                     """,
                     (
                         payload.station_id,
+                        curr_distance,
+                        curr_rain_raw,
+                        curr_flow_rate,
+                        curr_soil_raw,
+                        curr_tds_voltage,
+                        curr_edge_ai_score,
+                        curr_fog_class,
+                        payload.overflow_alert,
+                        payload.ai_anomaly_alert,
+                        True,  # synced_to_cloud
                         json.dumps(dist_horizon),
                         json.dumps(flow_horizon),
                         json.dumps(soil_horizon),
