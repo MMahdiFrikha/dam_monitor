@@ -54,6 +54,7 @@ lgb_dist = joblib.load(resolve_model_path("lgbm_model_distance_cm.pkl"))
 class TelemetryPayload(BaseModel):
     sequence: list[float] = Field(..., description="Flat array of 36 timesteps x 7 features (252 total floats)")
     layer2_risk: int = Field(..., ge=0, le=2, description="Risk level: 0=Normal, 1=Warning, 2=Critical")
+    station_id: str | None = Field(default=None, description="Optional station identifier")
 
 
 @app.get("/")
@@ -102,7 +103,7 @@ def predict_horizon(payload: TelemetryPayload):
     flow_horizon = np.asarray(flow_pred).ravel()[:6].tolist()
     soil_horizon = np.asarray(soil_pred).ravel()[:6].tolist()
 
-    # Persist predictions to Supabase
+    # --- Persist to Supabase ---
     conn = get_db_connection()
     if conn:
         try:
@@ -110,13 +111,15 @@ def predict_horizon(payload: TelemetryPayload):
                 cur.execute(
                     """
                     INSERT INTO forecasts (
-                        distance_cm,
-                        flow_rate,
-                        soil_raw,
+                        station_id,
+                        prediction_distance,
+                        prediction_flow_rate,
+                        prediction_soil_raw,
                         distance_model_used
-                    ) VALUES (%s, %s, %s, %s);
+                    ) VALUES (%s, %s, %s, %s, %s);
                     """,
                     (
+                        payload.station_id,
                         json.dumps(dist_horizon),
                         json.dumps(flow_horizon),
                         json.dumps(soil_horizon),
@@ -131,8 +134,8 @@ def predict_horizon(payload: TelemetryPayload):
             conn.close()
 
     return {
-        "distance_cm": dist_horizon,
-        "flow_rate": flow_horizon,
-        "soil_raw": soil_horizon,
+        "prediction_distance": dist_horizon,
+        "prediction_flow_rate": flow_horizon,
+        "prediction_soil_raw": soil_horizon,
         "distance_model_used": active_model,
     }
