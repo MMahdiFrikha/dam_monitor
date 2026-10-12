@@ -5,3 +5,4 @@ scikit-learn
 xgboost
 lightgbm
 joblib
+psycopg2-binary
