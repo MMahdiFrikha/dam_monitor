@@ -1,9 +1,25 @@
 from pathlib import Path
+import os
+import json
 import joblib
 import numpy as np
 import xgboost as xgb
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+import psycopg2
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+def get_db_connection():
+    """Establish and return a connection to Supabase PostgreSQL."""
+    if not DATABASE_URL:
+        print("[DB] DATABASE_URL is not set!")
+        return None
+    try:
+        return psycopg2.connect(DATABASE_URL)
+    except Exception as e:
+        print(f"[DB] Error connecting to Supabase: {e}")
+        return None
 
 app = FastAPI(title="Edge AI Multi-Step Forecaster")
 
@@ -19,11 +35,11 @@ def resolve_model_path(filename: str) -> Path:
         return path_in_root
     raise FileNotFoundError(f"Model asset '{filename}' not found in 'models/' or root directory.")
 
-# 1. Load scalers using updated filenames
+# 1. Load scalers
 scaler_lgb = joblib.load(resolve_model_path("scaler_lgb.pkl"))
 scaler_xgb = joblib.load(resolve_model_path("scaler_xgboost.pkl"))
 
-# 2. Load models using updated filenames
+# 2. Load models
 xgb_soil = xgb.XGBRegressor()
 xgb_soil.load_model(str(resolve_model_path("xgb_model_soil_raw.json")))
 
@@ -81,13 +97,42 @@ def predict_horizon(payload: TelemetryPayload):
         dist_pred = xgb_dist.predict(scaled_data_xgb)
         active_model = "XGBoost"
 
-    dist_flat = np.asarray(dist_pred).ravel()
-    flow_flat = np.asarray(flow_pred).ravel()
-    soil_flat = np.asarray(soil_pred).ravel()
+    # Extract first 6 steps of the prediction horizon
+    dist_horizon = np.asarray(dist_pred).ravel()[:6].tolist()
+    flow_horizon = np.asarray(flow_pred).ravel()[:6].tolist()
+    soil_horizon = np.asarray(soil_pred).ravel()[:6].tolist()
+
+    # Persist predictions to Supabase
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO forecasts (
+                        distance_cm,
+                        flow_rate,
+                        soil_raw,
+                        distance_model_used
+                    ) VALUES (%s, %s, %s, %s);
+                    """,
+                    (
+                        json.dumps(dist_horizon),
+                        json.dumps(flow_horizon),
+                        json.dumps(soil_horizon),
+                        active_model,
+                    ),
+                )
+                conn.commit()
+        except Exception as db_err:
+            print(f"[DB] Insert failed: {db_err}")
+            conn.rollback()
+        finally:
+            conn.close()
 
     return {
-        "distance_cm": dist_flat[:6].tolist(),
-        "flow_rate": flow_flat[:6].tolist(),
-        "soil_raw": soil_flat[:6].tolist(),
+        "distance_cm": dist_horizon,
+        "flow_rate": flow_horizon,
+        "soil_raw": soil_horizon,
         "distance_model_used": active_model,
     }
